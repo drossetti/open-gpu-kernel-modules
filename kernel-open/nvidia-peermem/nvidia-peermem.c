@@ -248,9 +248,16 @@ static int nv_dma_map(struct sg_table *sg_head, void *context,
     struct scatterlist *sg;
     struct nv_mem_context *nv_mem_context =
         (struct nv_mem_context *) context;
-    struct nvidia_p2p_page_table *page_table = nv_mem_context->page_table;
-    struct nvidia_p2p_dma_mapping *dma_mapping;
+    struct nvidia_p2p_page_table *page_table = NULL;
+    struct nvidia_p2p_dma_mapping *dma_mapping = NULL;
     struct pci_dev *pdev = to_pci_dev(dma_device);
+
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context while dma mappping, this is a SERIOUS ERROR\n");
+        return -EINVAL;
+    }
+
+    page_table = nv_mem_context->page_table;
 
     if (page_table->page_size != NVIDIA_P2P_PAGE_SIZE_64KB) {
         peer_err("nv_dma_map -- assumption of 64KB pages failed size_id=%u\n",
@@ -309,6 +316,11 @@ static int nv_dma_unmap(struct sg_table *sg_head, void *context,
         return -EINVAL;
     }
 
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context while dma unmappping, this is a SERIOUS ERROR\n");
+        return -EINVAL;
+    }
+
     if (WARN_ON(0 != memcmp(sg_head, &nv_mem_context->sg_head, sizeof(*sg_head))))
         return -EINVAL;
 
@@ -333,6 +345,11 @@ static void nv_mem_put_pages_common(int nc,
 
     if (!nv_mem_context) {
         peer_err("nv_mem_put_pages -- invalid nv_mem_context\n");
+        return;
+    }
+
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context while unmapping GPU memory, this is a SERIOUS ERROR\n");
         return;
     }
 
@@ -382,6 +399,11 @@ static void nv_mem_release(void *context)
 {
     struct nv_mem_context *nv_mem_context =
         (struct nv_mem_context *) context;
+
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context while releasing it, this is a SERIOUS ERROR\n");
+        return;
+    }
     if (nv_mem_context->sg_allocated) {
         sg_free_table(&nv_mem_context->sg_head);
         nv_mem_context->sg_allocated = 0;
@@ -402,8 +424,11 @@ static int nv_mem_get_pages(unsigned long addr,
     struct nv_mem_context *nv_mem_context;
 
     nv_mem_context = (struct nv_mem_context *)client_context;
-    if (!nv_mem_context)
+
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context while mapping GPU memory, this is a SERIOUS ERROR\n");
         return -EINVAL;
+    }
 
     nv_mem_context->core_context = core_context;
     nv_mem_context->page_size = GPU_PAGE_SIZE;
@@ -427,6 +452,9 @@ static unsigned long nv_mem_get_page_size(void *context)
     struct nv_mem_context *nv_mem_context =
                 (struct nv_mem_context *)context;
 
+    if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
+        peer_err("detected invalid context in get page size, this is a SERIOUS ERROR\n");
+    }
     return nv_mem_context->page_size;
 }
 
