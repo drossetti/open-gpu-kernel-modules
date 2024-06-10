@@ -637,6 +637,7 @@ static int __init nv_mem_client_init(void)
     if (rc)
         goto out;
 
+    printk(KERN_INFO, "nvidia-peermem sizeof(nv_mem_context)=%d\n", sizeof(struct nv_mem_context));
 out:
     if (rc) {
         if (reg_handle) {
