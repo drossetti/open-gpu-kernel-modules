@@ -203,9 +203,11 @@ static int nv_mem_acquire(unsigned long addr, size_t size, void *peer_mem_privat
     struct nv_mem_context *nv_mem_context;
 
     nv_mem_context = kzalloc(sizeof *nv_mem_context, GFP_KERNEL);
-    if (!nv_mem_context)
+    if (!nv_mem_context) {
+        peer_err("cannot allocate memory for context, this is a SERIOUS ERROR\n", ret);
         /* Error case handled as not mine */
         return 0;
+    }
 
     nv_mem_context->pad1 = NV_MEM_CONTEXT_MAGIC;
     nv_mem_context->page_virt_start = addr & GPU_PAGE_MASK;
