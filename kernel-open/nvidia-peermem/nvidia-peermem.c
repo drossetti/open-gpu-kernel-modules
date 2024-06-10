@@ -73,6 +73,8 @@ MODULE_PARM_DESC(persistent_api_support, "Set level of support for persistent AP
 #define peer_trace(FMT, ARGS...) do {} while (0)
 #endif
 
+#define _DEBUG_ONLY_ 1
+
 #if defined(NV_MLNX_IB_PEER_MEM_SYMBOLS_PRESENT)
 
 #ifndef READ_ONCE
