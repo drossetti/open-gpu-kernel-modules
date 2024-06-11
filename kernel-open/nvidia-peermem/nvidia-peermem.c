@@ -240,7 +240,6 @@ static int nv_mem_acquire(unsigned long addr, size_t size, void *peer_mem_privat
 
 err:
     memset(nv_mem_context, 0, sizeof(*nv_mem_context));
-    //kfree(nv_mem_context);
     kmem_cache_free(context_cache, nv_mem_context);
 
     /* Error case handled as not mine */
@@ -416,7 +415,7 @@ static void nv_mem_release(void *context)
         nv_mem_context->sg_allocated = 0;
     }
     memset(nv_mem_context, 0, sizeof(*nv_mem_context));
-    kfree(nv_mem_context);
+    kmem_cache_free(context_cache, nv_mem_context);
     module_put(THIS_MODULE);
     return;
 }
