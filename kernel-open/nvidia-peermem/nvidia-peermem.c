@@ -94,6 +94,8 @@ invalidate_peer_memory mem_invalidate_callback;
 static void *reg_handle = NULL;
 static void *reg_handle_nc = NULL;
 
+static struct kmem_cache *context_cache = NULL;
+
 #define NV_MEM_CONTEXT_MAGIC ((u64)0xF1F4F1D0FEF0DAD0ULL)
 
 struct nv_mem_context {
@@ -202,13 +204,13 @@ static int nv_mem_acquire(unsigned long addr, size_t size, void *peer_mem_privat
     int ret = 0;
     struct nv_mem_context *nv_mem_context;
 
-    nv_mem_context = kzalloc(sizeof *nv_mem_context, GFP_KERNEL);
+    nv_mem_context = kmem_cache_alloc(context_cache, GFP_KERNEL);
     if (!nv_mem_context) {
         peer_err("cannot allocate memory for context, this is a SERIOUS ERROR\n", ret);
         /* Error case handled as not mine */
         return 0;
     }
-
+    memset(nv_mem_context, 0, sizeof(*nv_mem_context));
     nv_mem_context->pad1 = NV_MEM_CONTEXT_MAGIC;
     nv_mem_context->page_virt_start = addr & GPU_PAGE_MASK;
     nv_mem_context->page_virt_end   = (addr + size + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK;
@@ -238,7 +240,8 @@ static int nv_mem_acquire(unsigned long addr, size_t size, void *peer_mem_privat
 
 err:
     memset(nv_mem_context, 0, sizeof(*nv_mem_context));
-    kfree(nv_mem_context);
+    //kfree(nv_mem_context);
+    kmem_cache_free(context_cache, nv_mem_context);
 
     /* Error case handled as not mine */
     return 0;
@@ -627,6 +630,12 @@ static int __init nv_mem_client_init(void)
         return rc;
     }
 
+    context_cache = kmem_cache_create("nv_mem_context", sizeof(struct nv_mem_context), 0, 0, NULL);
+    if (!context_cache) {
+        peer_err("error allocating context cache\n");
+        return -ENOMEM;
+    }
+    
     if (persistent_api_support == NV_MEM_PERSISTENT_API_SUPPORT_LEGACY) {
         rc = nv_mem_legacy_client_init();
         if (rc)
@@ -665,6 +674,8 @@ static void __exit nv_mem_client_cleanup(void)
 
     if (reg_handle_nc)
         ib_unregister_peer_memory_client(reg_handle_nc);
+
+    kmem_cache_destroy(context_cache);
 #endif
 }
 
