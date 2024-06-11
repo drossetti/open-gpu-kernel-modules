@@ -97,6 +97,12 @@ static void *reg_handle_nc = NULL;
 static struct kmem_cache *context_cache = NULL;
 
 #define NV_MEM_CONTEXT_MAGIC ((u64)0xF1F4F1D0FEF0DAD0ULL)
+enum {
+    NV_MEM_CONTEXT_FLAGS_SG_ALLOCATED = 0,
+    NV_MEM_CONTEXT_FLAGS_RACING_ACCESS = 1,
+    NV_MEM_CONTEXT_FLAGS_DONT_FREE = 2,
+    NV_MEM_CONTEXT_NUM_FLAGS
+};
 
 struct nv_mem_context {
     u64 pad1;
@@ -109,7 +115,7 @@ struct nv_mem_context {
     unsigned long npages;
     unsigned long page_size;
     struct task_struct *callback_task;
-    int sg_allocated;
+    long flags;
     struct sg_table sg_head;
     u64 pad2;
 };
@@ -141,22 +147,25 @@ static void nv_get_p2p_free_callback(void *data)
         peer_err("detected invalid context, skipping further processing\n");
         goto out;
     }
-
-    if (!nv_mem_context->page_table) {
-        peer_err("nv_get_p2p_free_callback -- invalid page_table\n");
+    if (test_and_set_bit(NV_MEM_CONTEXT_FLAGS_RACING_ACCESS, &nv_mem_context->flags)) {
+        peer_err("detected p2p free callback racing access to context, skipping further processing\n");
         goto out;
     }
 
     /* Save page_table locally to prevent it being freed as part of nv_mem_release
      *  in case it's called internally by that callback.
      */
-    page_table = nv_mem_context->page_table;
+    page_table = READ_ONCE(nv_mem_context->page_table);
+    if (!page_table) {
+        peer_err("nv_get_p2p_free_callback -- invalid page_table\n");
+        goto out;
+    }
 
-    if (!nv_mem_context->dma_mapping) {
+    dma_mapping = READ_ONCE(nv_mem_context->dma_mapping);
+    if (!dma_mapping) {
         peer_err("nv_get_p2p_free_callback -- invalid dma_mapping\n");
         goto out;
     }
-    dma_mapping = nv_mem_context->dma_mapping;
 
     /* For now don't set nv_mem_context->page_table to NULL,
      * confirmed by NVIDIA that inflight put_pages with valid pointer will fail gracefully.
@@ -215,6 +224,7 @@ static int nv_mem_acquire(unsigned long addr, size_t size, void *peer_mem_privat
     nv_mem_context->page_virt_start = addr & GPU_PAGE_MASK;
     nv_mem_context->page_virt_end   = (addr + size + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK;
     nv_mem_context->mapped_size  = nv_mem_context->page_virt_end - nv_mem_context->page_virt_start;
+    nv_mem_context->flags = 0;
     nv_mem_context->pad2 = NV_MEM_CONTEXT_MAGIC;
 
     ret = nvidia_p2p_get_pages(0, 0, nv_mem_context->page_virt_start, nv_mem_context->mapped_size,
@@ -298,13 +308,13 @@ static int nv_dma_map(struct sg_table *sg_head, void *context,
     }
 
     nv_mem_context->dma_mapping = dma_mapping;
-    nv_mem_context->sg_allocated = 1;
     for_each_sg(sg_head->sgl, sg, nv_mem_context->npages, i) {
         sg_set_page(sg, NULL, nv_mem_context->page_size, 0);
         sg_dma_address(sg) = dma_mapping->dma_addresses[i];
         sg_dma_len(sg) = nv_mem_context->page_size;
     }
     nv_mem_context->sg_head = *sg_head;
+    set_bit(NV_MEM_CONTEXT_FLAGS_SG_ALLOCATED, &nv_mem_context->flags);
     *nmap = nv_mem_context->npages;
 
     return 0;
@@ -317,14 +327,15 @@ static int nv_dma_unmap(struct sg_table *sg_head, void *context,
     struct nv_mem_context *nv_mem_context =
         (struct nv_mem_context *)context;
 
-    if (!nv_mem_context) {
-        peer_err("nv_dma_unmap -- invalid nv_mem_context\n");
-        return -EINVAL;
-    }
-
     if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
         peer_err("detected invalid context while dma unmappping, this is a SERIOUS ERROR\n");
         return -EINVAL;
+    }
+
+    // this is the first time the cleanup code flows through this module
+    if(test_and_set_bit(NV_MEM_CONTEXT_FLAGS_RACING_ACCESS, &nv_mem_context->flags)) {
+        peer_err("dma_umap detected racing access to context, setting DONT_FREE\n");
+        set_bit(NV_MEM_CONTEXT_FLAGS_DONT_FREE, &nv_mem_context->flags);
     }
 
     if (WARN_ON(0 != memcmp(sg_head, &nv_mem_context->sg_head, sizeof(*sg_head))))
@@ -348,11 +359,6 @@ static void nv_mem_put_pages_common(int nc,
     int ret = 0;
     struct nv_mem_context *nv_mem_context =
         (struct nv_mem_context *) context;
-
-    if (!nv_mem_context) {
-        peer_err("nv_mem_put_pages -- invalid nv_mem_context\n");
-        return;
-    }
 
     if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
         peer_err("detected invalid context while unmapping GPU memory, this is a SERIOUS ERROR\n");
@@ -407,15 +413,19 @@ static void nv_mem_release(void *context)
         (struct nv_mem_context *) context;
 
     if (!NV_MEM_CONTEXT_CHECK_OK(nv_mem_context)) {
-        peer_err("detected invalid context while releasing it, this is a SERIOUS ERROR\n");
-        return;
+        peer_err("detected invalid context while releasing it, this is a SERIOUS ERROR.\n");
+        goto out;
     }
-    if (nv_mem_context->sg_allocated) {
+    if (test_and_clear_bit(NV_MEM_CONTEXT_FLAGS_SG_ALLOCATED, &nv_mem_context->flags)) {
         sg_free_table(&nv_mem_context->sg_head);
-        nv_mem_context->sg_allocated = 0;
     }
-    memset(nv_mem_context, 0, sizeof(*nv_mem_context));
-    kmem_cache_free(context_cache, nv_mem_context);
+    if (test_bit(NV_MEM_CONTEXT_FLAGS_DONT_FREE, &nv_mem_context->flags)) {
+        peer_err("leaking context, stays in the kmem cache until module unload\n");
+    } else {
+        memset(nv_mem_context, 0, sizeof(*nv_mem_context));
+        kmem_cache_free(context_cache, nv_mem_context);
+    }
+out:
     module_put(THIS_MODULE);
     return;
 }
