@@ -332,17 +332,20 @@ static int nv_dma_unmap(struct sg_table *sg_head, void *context,
         return -EINVAL;
     }
 
+    if (WARN_ON(0 != memcmp(sg_head, &nv_mem_context->sg_head, sizeof(*sg_head)))) {
+        peer_err("detected invalid sg head\n");
+        return -EINVAL;
+    }
+
+    if (nv_mem_context->callback_task == current)
+        // when called by the p2p callback
+        goto out;
+
     // this is the first time the cleanup code flows through this module
     if(test_and_set_bit(NV_MEM_CONTEXT_FLAGS_RACING_ACCESS, &nv_mem_context->flags)) {
         peer_err("dma_umap detected racing access to context, setting DONT_FREE\n");
         set_bit(NV_MEM_CONTEXT_FLAGS_DONT_FREE, &nv_mem_context->flags);
     }
-
-    if (WARN_ON(0 != memcmp(sg_head, &nv_mem_context->sg_head, sizeof(*sg_head))))
-        return -EINVAL;
-
-    if (nv_mem_context->callback_task == current)
-        goto out;
 
     if (nv_mem_context->dma_mapping)
         nvidia_p2p_dma_unmap_pages(pdev, nv_mem_context->page_table,
@@ -369,6 +372,7 @@ static void nv_mem_put_pages_common(int nc,
         return;
 
     if (nv_mem_context->callback_task == current)
+        // when called by the p2p callback
         return;
 
     if (nc) {
